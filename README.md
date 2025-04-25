@@ -1,6 +1,6 @@
 # Book Recognition App
 
-This application uses OpenCV and Tesseract OCR to recognize books from their cover images and retrieve detailed information using the Google Books API.
+This application uses OpenCV and Tesseract OCR to recognize books from their cover images, group similar covers together, and retrieve detailed information using the Google Books API.
 
 ## Prerequisites
 
@@ -45,10 +45,23 @@ python book_recognition.py
 ```
 
 The application will:
-- Process all images in the `book_images` directory
-- Extract text from each image
-- Search for book information using the Google Books API
-- Save the results to `book_results.txt` in the `book_images` directory
+1. Analyze all book covers and group similar ones together
+2. Process one representative image from each group
+3. Extract text from the representative image
+4. Search for book information using the Google Books API (with rate limiting)
+5. Save the results to `book_results.txt` in the `book_images` directory
+
+## Features
+
+### Cover Similarity Detection
+- Uses ORB (Oriented FAST and Rotated BRIEF) features to detect similar book covers
+- Groups similar covers together to avoid duplicate processing
+- Adjustable similarity threshold (default: 0.3)
+
+### Rate Limiting
+- Implements intelligent rate limiting for Google Books API calls
+- Default: 60 calls per minute (configurable)
+- Automatic retry with backoff for rate limit errors
 
 ## Tips for Best Results
 
@@ -56,13 +69,26 @@ The application will:
 2. Ensure the text on the covers is readable
 3. Images should be right-side up (not rotated)
 4. Avoid glare or reflections on the book covers
+5. For similar cover detection:
+   - Use consistent lighting across images
+   - Try to maintain similar angles when photographing covers
+   - Adjust similarity threshold if needed (in code)
 
 ## Output
 
 The results will be saved in `book_images/book_results.txt` and will include:
-- Book title
-- Authors
-- Publisher
-- Publication date
-- ISBN
-- Description 
+- Representative image for each group
+- List of similar covers found
+- Book information:
+  - Title
+  - Authors
+  - Publisher
+  - Publication date
+  - ISBN
+  - Description
+
+## Performance Notes
+
+- The script processes images in groups to minimize API calls
+- Similar covers are detected using computer vision techniques before making API calls
+- Rate limiting ensures reliable API access without hitting quota limits 
