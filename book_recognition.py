@@ -7,6 +7,9 @@ from pathlib import Path
 import time
 from datetime import datetime, timedelta
 from collections import deque
+import numpy as np
+from skimage.feature import ORB
+from skimage.color import rgb2gray
 
 class RateLimiter:
     def __init__(self, calls_per_minute=60):
@@ -49,6 +52,12 @@ class BookRecognizer:
         # Initialize rate limiter (Google Books API default is 1000 queries per day)
         # Setting a conservative limit of 60 calls per minute
         self.rate_limiter = RateLimiter(calls_per_minute=60)
+
+        # Initialize ORB feature detector for cover similarity
+        self.feature_detector = ORB(n_keypoints=1000)
+
+        # Dictionary to store feature descriptors for all images
+        self.image_features = {}
 
     def get_image_files(self):
         """Get all image files from the specified directory"""
@@ -119,22 +128,107 @@ class BookRecognizer:
                 return self.search_book(query)  # Retry the request
             return None
 
-    def run(self):
-        """Main function to process all images in the directory"""
+    def extract_features(self, image_path):
+        """Extract ORB features from an image"""
+        # Read and preprocess image
+        image = cv2.imread(str(image_path))
+        if image is None:
+            return None, None
+
+        # Convert from BGR to RGB
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Convert to grayscale
+        if len(image.shape) == 3:
+            image = rgb2gray(image)
+
+        self.feature_detector.detect_and_extract(image)
+        return self.feature_detector.keypoints, self.feature_detector.descriptors
+
+    def compute_similarity(self, desc1, desc2):
+        """Compute similarity score between two feature descriptors"""
+        if desc1 is None or desc2 is None:
+            return 0
+
+        # Use Hamming distance for binary descriptors
+        matches = 0
+        for d1 in desc1:
+            # Find the closest descriptor in desc2
+            distances = np.sum(d1 != desc2, axis=1)
+            min_dist = np.min(distances)
+            if min_dist < 32:  # threshold for good match
+                matches += 1
+
+        # Normalize similarity score
+        similarity = matches / min(len(desc1), len(desc2))
+        return similarity
+
+    def group_similar_covers(self, threshold=0.3):
+        """Group similar book covers together"""
         image_files = self.get_image_files()
 
         if not image_files:
             print(f"No image files found in {self.images_dir}")
-            return
+            return []
 
         print(f"Found {len(image_files)} images to process")
-        results = []
+        print("\nAnalyzing cover similarities...")
+
+        # Extract features for all images
+        for image_path in image_files:
+            if str(image_path) not in self.image_features:
+                _, descriptors = self.extract_features(image_path)
+                self.image_features[str(image_path)] = descriptors
+
+        # Create groups of similar images
+        groups = []
+        processed = set()
 
         for image_path in image_files:
-            print(f"\nProcessing {image_path.name}...")
+            if str(image_path) in processed:
+                continue
 
-            # Extract text from image
-            extracted_text = self.process_image(image_path)
+            current_group = [image_path]
+            processed.add(str(image_path))
+
+            # Compare with all other unprocessed images
+            for other_path in image_files:
+                if str(other_path) in processed:
+                    continue
+
+                similarity = self.compute_similarity(
+                    self.image_features[str(image_path)],
+                    self.image_features[str(other_path)]
+                )
+
+                if similarity > threshold:
+                    current_group.append(other_path)
+                    processed.add(str(other_path))
+
+            groups.append(current_group)
+
+        print(f"Found {len(groups)} distinct cover groups")
+        return groups
+
+    def run(self):
+        """Main function to process all images in the directory"""
+        # First, group similar covers
+        groups = self.group_similar_covers()
+        if not groups:
+            return
+
+        results = []
+
+        # Process each group
+        for group_idx, group in enumerate(groups, 1):
+            print(f"\nProcessing group {group_idx} ({len(group)} images)...")
+
+            # Use the first image in the group as the representative
+            representative_image = group[0]
+            print(f"Using {representative_image.name} as representative image")
+
+            # Extract text from representative image
+            extracted_text = self.process_image(representative_image)
 
             if extracted_text:
                 print("Searching for book information...")
@@ -142,19 +236,26 @@ class BookRecognizer:
                 book_info = self.search_book(extracted_text)
 
                 if book_info:
-                    results.append({
-                        'image': image_path.name,
+                    group_result = {
+                        'representative_image': representative_image.name,
+                        'similar_images': [img.name for img in group[1:]],
                         'info': book_info
-                    })
+                    }
+                    results.append(group_result)
+
                     print(f"✓ Found: {book_info['title']} by {', '.join(book_info['authors'])}")
+                    if len(group) > 1:
+                        print("Similar covers in this group:")
+                        for img in group[1:]:
+                            print(f"  - {img.name}")
                 else:
-                    print(f"✗ No book information found for {image_path.name}")
+                    print(f"✗ No book information found for {representative_image.name}")
             else:
-                print(f"✗ No text could be extracted from {image_path.name}")
+                print(f"✗ No text could be extracted from {representative_image.name}")
 
         # Print final summary
         print("\n=== Summary ===")
-        print(f"Successfully processed {len(results)} out of {len(image_files)} images\n")
+        print(f"Successfully processed {len(results)} out of {len(groups)} groups\n")
 
         # Save results to a file
         self.save_results(results)
@@ -165,7 +266,7 @@ class BookRecognizer:
 
         with open(output_file, 'w', encoding='utf-8') as f:
             for result in results:
-                f.write(f"\nImage: {result['image']}\n")
+                f.write(f"\nGroup Representative Image: {result['representative_image']}\n")
                 f.write("=" * 50 + "\n")
                 f.write(f"Title: {result['info']['title']}\n")
                 f.write(f"Authors: {', '.join(result['info']['authors'])}\n")
@@ -174,6 +275,12 @@ class BookRecognizer:
                 f.write(f"ISBN: {result['info']['isbn']}\n")
                 f.write("\nDescription:\n")
                 f.write(f"{result['info']['description']}\n")
+
+                if result['similar_images']:
+                    f.write("\nSimilar Covers in Group:\n")
+                    for img in result['similar_images']:
+                        f.write(f"  - {img}\n")
+
                 f.write("=" * 50 + "\n")
 
         print(f"Results have been saved to {output_file}")
